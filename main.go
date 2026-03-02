@@ -1,14 +1,19 @@
 package main
 
-import "net/http"
+import (
+	"log"
+	"net/http"
+)
 
 func main() {
-	router := http.NewServeMux()
-	router.Handle("/", http.FileServer(http.Dir(".")))
+	mux := http.NewServeMux()
+
+	fs := http.FileServer(http.Dir("."))
+	mux.Handle("/", fs)
 
 	srv := http.Server{
 		Addr:    ":8080",
-		Handler: router,
+		Handler: mux,
 	}
-	srv.ListenAndServe()
+	log.Fatal(srv.ListenAndServe())
 }
