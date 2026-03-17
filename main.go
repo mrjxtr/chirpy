@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -19,9 +20,10 @@ func main() {
 	fs := http.FileServer(http.Dir("."))
 
 	mux.Handle("/app/", apiCfg.middlewareMetricsInc(http.StripPrefix("/app", fs)))
-	mux.HandleFunc("GET /metrics", apiCfg.metricsHandler)
-	mux.HandleFunc("POST /reset", apiCfg.resetMetricsHandler)
-	mux.HandleFunc("GET /healthz", healthHandler)
+	mux.HandleFunc("GET /admin/metrics", apiCfg.metricsHandler)
+	mux.HandleFunc("POST /admin/reset", apiCfg.resetMetricsHandler)
+	mux.HandleFunc("GET /api/healthz", healthHandler)
+	mux.HandleFunc("POST /api/validate_chirp", validateChirpHandler)
 
 	srv := http.Server{
 		Addr:    ":8080",
@@ -36,6 +38,59 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("OK"))
 }
 
+func validateChirpHandler(w http.ResponseWriter, r *http.Request) {
+	defer r.Body.Close()
+
+	type chirpRequest struct {
+		Body string `json:"body"`
+	}
+	var req chirpRequest
+
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(&req); err != nil {
+		respondWithError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+
+	if len(req.Body) > 140 {
+		respondWithError(w, http.StatusBadRequest, "Chirp is too long")
+		return
+	}
+
+	respondWithJSON(w, http.StatusOK, map[string]bool{
+		"valid": true,
+	})
+}
+
+func respondWithError(w http.ResponseWriter, code int, msg string) {
+	type respBody struct {
+		Error string `json:"error"`
+	}
+
+	rbody := &respBody{
+		Error: msg,
+	}
+	resp, err := json.Marshal(rbody)
+	if err != nil {
+		log.Printf("Error marshalling json: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	w.Write(resp)
+}
+
+func respondWithJSON(w http.ResponseWriter, code int, payload any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+
+	if err := json.NewEncoder(w).Encode(payload); err != nil {
+		log.Printf("Error encoding json %v", err)
+	}
+}
+
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cfg.fileserverHits.Add(1)
@@ -44,10 +99,16 @@ func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
 }
 
 func (cfg *apiConfig) metricsHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Content-Type", "text/html")
 	w.WriteHeader(http.StatusOK)
 
-	hits := fmt.Sprintf("Hits: %v", cfg.fileserverHits.Load())
+	hits := fmt.Sprintf(`
+		<html>
+			<body>
+				<h1>Welcome, Chirpy Admin</h1>
+				<p>Chirpy has been visited %d times!</p>
+			</body>
+		</html>`, cfg.fileserverHits.Load())
 	w.Write([]byte(hits))
 }
 
