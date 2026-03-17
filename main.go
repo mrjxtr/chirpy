@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"sync/atomic"
 )
 
@@ -38,6 +39,24 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("OK"))
 }
 
+func cleanProfanity(text string) string {
+	badWords := map[string]struct{}{
+		"kerfuffle": {},
+		"sharbert":  {},
+		"fornax":    {},
+	}
+
+	words := strings.Split(text, " ")
+
+	for i, w := range words {
+		if _, found := badWords[strings.ToLower(w)]; found {
+			words[i] = "****"
+		}
+	}
+
+	return strings.Join(words, " ")
+}
+
 func validateChirpHandler(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
@@ -57,8 +76,10 @@ func validateChirpHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	respondWithJSON(w, http.StatusOK, map[string]bool{
-		"valid": true,
+	cleaned := cleanProfanity(req.Body)
+
+	respondWithJSON(w, http.StatusOK, map[string]string{
+		"cleaned_body": cleaned,
 	})
 }
 
