@@ -18,11 +18,14 @@ import (
 type apiConfig struct {
 	fileserverHits atomic.Int32
 	dbQueries      *database.Queries
+	platform       string
 }
 
 func main() {
 	godotenv.Load()
+
 	dbURL := os.Getenv("DB_URL")
+	pf := os.Getenv("PLATFORM")
 
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
@@ -31,6 +34,7 @@ func main() {
 
 	apiCfg := &apiConfig{
 		dbQueries: database.New(db),
+		platform:  pf,
 	}
 
 	mux := http.NewServeMux()
@@ -42,6 +46,8 @@ func main() {
 	mux.HandleFunc("POST /admin/reset", apiCfg.resetMetricsHandler)
 	mux.HandleFunc("GET /api/healthz", healthHandler)
 	mux.HandleFunc("POST /api/validate_chirp", validateChirpHandler)
+
+	mux.HandleFunc("POST /api/users", apiCfg.createUser)
 
 	srv := http.Server{
 		Addr:    ":8080",
@@ -149,6 +155,41 @@ func (cfg *apiConfig) metricsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (cfg *apiConfig) resetMetricsHandler(w http.ResponseWriter, r *http.Request) {
+	if cfg.platform != "dev" {
+		respondWithError(w, http.StatusForbidden, "Forbidden endpoint")
+		return
+	}
+
 	w.WriteHeader(http.StatusOK)
 	cfg.fileserverHits = atomic.Int32{}
+}
+
+func (cfg *apiConfig) createUser(w http.ResponseWriter, r *http.Request) {
+	type parameters struct {
+		Email string `json:"email"`
+	}
+
+	params := parameters{}
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(&params); err != nil {
+		respondWithError(w, http.StatusBadRequest, "Invalid request paylaod")
+		return
+	}
+
+	user, err := cfg.dbQueries.CreateUser(r.Context(), params.Email)
+	if err != nil {
+		respondWithError(
+			w,
+			http.StatusBadRequest,
+			fmt.Sprintf("Error Creating User %v", err),
+		)
+		return
+	}
+
+	respondWithJSON(w, http.StatusCreated, map[string]any{
+		"id":         user.ID,
+		"created_at": user.CreatedAt,
+		"updated_at": user.UpdatedAt,
+		"email":      user.Email,
+	})
 }
