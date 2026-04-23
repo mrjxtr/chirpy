@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 
+	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
 	"github.com/mrjxtr/chirpy/internal/database"
@@ -45,9 +46,9 @@ func main() {
 	mux.HandleFunc("GET /admin/metrics", apiCfg.metricsHandler)
 	mux.HandleFunc("POST /admin/reset", apiCfg.resetMetricsHandler)
 	mux.HandleFunc("GET /api/healthz", healthHandler)
-	mux.HandleFunc("POST /api/validate_chirp", validateChirpHandler)
 
 	mux.HandleFunc("POST /api/users", apiCfg.createUser)
+	mux.HandleFunc("POST /api/chirps", apiCfg.createChirp)
 
 	srv := http.Server{
 		Addr:    ":8080",
@@ -78,32 +79,6 @@ func cleanProfanity(text string) string {
 	}
 
 	return strings.Join(words, " ")
-}
-
-func validateChirpHandler(w http.ResponseWriter, r *http.Request) {
-	defer r.Body.Close()
-
-	type chirpRequest struct {
-		Body string `json:"body"`
-	}
-	var req chirpRequest
-
-	decoder := json.NewDecoder(r.Body)
-	if err := decoder.Decode(&req); err != nil {
-		respondWithError(w, http.StatusBadRequest, "Invalid JSON")
-		return
-	}
-
-	if len(req.Body) > 140 {
-		respondWithError(w, http.StatusBadRequest, "Chirp is too long")
-		return
-	}
-
-	cleaned := cleanProfanity(req.Body)
-
-	respondWithJSON(w, http.StatusOK, map[string]string{
-		"cleaned_body": cleaned,
-	})
 }
 
 func respondWithError(w http.ResponseWriter, code int, msg string) {
@@ -191,5 +166,47 @@ func (cfg *apiConfig) createUser(w http.ResponseWriter, r *http.Request) {
 		"created_at": user.CreatedAt,
 		"updated_at": user.UpdatedAt,
 		"email":      user.Email,
+	})
+}
+
+func (cfg *apiConfig) createChirp(w http.ResponseWriter, r *http.Request) {
+	defer r.Body.Close()
+
+	type parameters struct {
+		Body   string    `json:"body"`
+		UserID uuid.UUID `json:"user_id"`
+	}
+
+	params := parameters{}
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(&params); err != nil {
+		respondWithError(w, http.StatusBadRequest, "Invalid request payload")
+		return
+	}
+
+	if len(params.Body) > 140 {
+		respondWithError(w, http.StatusBadRequest, "Chirp is too long")
+		return
+	}
+
+	chirp, err := cfg.dbQueries.CreateChirp(r.Context(), database.CreateChirpParams{
+		Body:   cleanProfanity(params.Body),
+		UserID: params.UserID,
+	})
+	if err != nil {
+		respondWithError(
+			w,
+			http.StatusInternalServerError,
+			fmt.Sprintf("Error creating chirp: %v", err),
+		)
+		return
+	}
+
+	respondWithJSON(w, http.StatusCreated, map[string]any{
+		"id":         chirp.ID,
+		"created_at": chirp.CreatedAt,
+		"updated_at": chirp.UpdatedAt,
+		"body":       chirp.Body,
+		"user_id":    chirp.UserID,
 	})
 }
