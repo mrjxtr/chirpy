@@ -49,6 +49,7 @@ func main() {
 
 	mux.HandleFunc("POST /api/users", apiCfg.createUser)
 	mux.HandleFunc("POST /api/chirps", apiCfg.createChirp)
+	mux.HandleFunc("GET /api/chirps", apiCfg.getChirps)
 
 	srv := http.Server{
 		Addr:    ":8080",
@@ -129,14 +130,25 @@ func (cfg *apiConfig) metricsHandler(w http.ResponseWriter, r *http.Request) {
 </html>`, cfg.fileserverHits.Load())
 }
 
+// resetMetricsHandler zeroes the hit counter and wipes every user. Chirps go
+// with them via the ON DELETE CASCADE on chirps.user_id. Dev only.
 func (cfg *apiConfig) resetMetricsHandler(w http.ResponseWriter, r *http.Request) {
 	if cfg.platform != "dev" {
 		respondWithError(w, http.StatusForbidden, "Forbidden endpoint")
 		return
 	}
 
-	w.WriteHeader(http.StatusOK)
+	if err := cfg.dbQueries.DeleteUsers(r.Context()); err != nil {
+		respondWithError(
+			w,
+			http.StatusInternalServerError,
+			fmt.Sprintf("Error resetting users: %v", err),
+		)
+		return
+	}
+
 	cfg.fileserverHits = atomic.Int32{}
+	w.WriteHeader(http.StatusOK)
 }
 
 func (cfg *apiConfig) createUser(w http.ResponseWriter, r *http.Request) {
@@ -209,4 +221,31 @@ func (cfg *apiConfig) createChirp(w http.ResponseWriter, r *http.Request) {
 		"body":       chirp.Body,
 		"user_id":    chirp.UserID,
 	})
+}
+
+// getChirps returns every chirp in the db, oldest first (by created_at).
+func (cfg *apiConfig) getChirps(w http.ResponseWriter, r *http.Request) {
+	chirps, err := cfg.dbQueries.GetChirps(r.Context())
+	if err != nil {
+		respondWithError(
+			w,
+			http.StatusInternalServerError,
+			fmt.Sprintf("Error getting chirps: %v", err),
+		)
+		return
+	}
+
+	// build explicitly so an empty table still marshals as [] instead of null
+	resp := make([]map[string]any, 0, len(chirps))
+	for _, chirp := range chirps {
+		resp = append(resp, map[string]any{
+			"id":         chirp.ID,
+			"created_at": chirp.CreatedAt,
+			"updated_at": chirp.UpdatedAt,
+			"body":       chirp.Body,
+			"user_id":    chirp.UserID,
+		})
+	}
+
+	respondWithJSON(w, http.StatusOK, resp)
 }
