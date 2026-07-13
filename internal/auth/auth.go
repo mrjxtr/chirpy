@@ -1,7 +1,17 @@
-// Package auth handles password hashing and verification for Chirpy.
+// Package auth handles password hashing and JWT creation/validation for Chirpy.
 package auth
 
-import "github.com/alexedwards/argon2id"
+import (
+	"fmt"
+	"time"
+
+	"github.com/alexedwards/argon2id"
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
+)
+
+// tokenIssuer identifies tokens minted by this service.
+const tokenIssuer = "chirpy-access"
 
 // HashPassword turns a plaintext password into an argon2id hash string. The
 // returned string already carries the salt and params, so it's the only thing
@@ -14,4 +24,55 @@ func HashPassword(password string) (string, error) {
 // means the hash itself was malformed, not that the password was wrong.
 func CheckPasswordHash(password, hash string) (bool, error) {
 	return argon2id.ComparePasswordAndHash(password, hash)
+}
+
+// MakeJWT mints an HS256 access token for userID that expires after expiresIn.
+// The user's id rides in the Subject claim as a string.
+func MakeJWT(
+	userID uuid.UUID,
+	tokenSecret string,
+	expiresIn time.Duration,
+) (string, error) {
+	now := time.Now().UTC()
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.RegisteredClaims{
+		Issuer:    tokenIssuer,
+		IssuedAt:  jwt.NewNumericDate(now),
+		ExpiresAt: jwt.NewNumericDate(now.Add(expiresIn)),
+		Subject:   userID.String(),
+	})
+
+	return token.SignedString([]byte(tokenSecret))
+}
+
+// ValidateJWT checks a token's signature and expiry, then pulls the user id out
+// of the Subject claim. Expired tokens, wrong secrets, and tokens signed with
+// an unexpected method all come back as errors.
+func ValidateJWT(tokenString, tokenSecret string) (uuid.UUID, error) {
+	claims := &jwt.RegisteredClaims{}
+
+	token, err := jwt.ParseWithClaims(
+		tokenString,
+		claims,
+		func(t *jwt.Token) (any, error) {
+			// guard against alg swapping, e.g. a token forged with "none"
+			if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
+			}
+			return []byte(tokenSecret), nil
+		},
+	)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	if !token.Valid {
+		return uuid.Nil, fmt.Errorf("invalid token")
+	}
+
+	userID, err := uuid.Parse(claims.Subject)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("invalid user id in token subject: %w", err)
+	}
+
+	return userID, nil
 }

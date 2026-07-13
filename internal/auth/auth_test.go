@@ -1,6 +1,11 @@
 package auth
 
-import "testing"
+import (
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+)
 
 func TestHashPassword(t *testing.T) {
 	password := "correct horse battery staple"
@@ -56,5 +61,57 @@ func TestCheckPasswordHash(t *testing.T) {
 				t.Errorf("CheckPasswordHash() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestMakeJWTAndValidateJWT(t *testing.T) {
+	userID := uuid.New()
+	secret := "super-secret-signing-key"
+
+	token, err := MakeJWT(userID, secret, time.Hour)
+	if err != nil {
+		t.Fatalf("MakeJWT() error = %v", err)
+	}
+
+	got, err := ValidateJWT(token, secret)
+	if err != nil {
+		t.Fatalf("ValidateJWT() error = %v", err)
+	}
+	if got != userID {
+		t.Errorf("ValidateJWT() = %v, want %v", got, userID)
+	}
+}
+
+func TestValidateJWTRejectsExpired(t *testing.T) {
+	userID := uuid.New()
+	secret := "super-secret-signing-key"
+
+	// negative duration puts ExpiresAt in the past
+	token, err := MakeJWT(userID, secret, -time.Minute)
+	if err != nil {
+		t.Fatalf("MakeJWT() error = %v", err)
+	}
+
+	if _, err := ValidateJWT(token, secret); err == nil {
+		t.Error("ValidateJWT() accepted an expired token, want error")
+	}
+}
+
+func TestValidateJWTRejectsWrongSecret(t *testing.T) {
+	userID := uuid.New()
+
+	token, err := MakeJWT(userID, "the-right-secret", time.Hour)
+	if err != nil {
+		t.Fatalf("MakeJWT() error = %v", err)
+	}
+
+	if _, err := ValidateJWT(token, "the-wrong-secret"); err == nil {
+		t.Error("ValidateJWT() accepted a token signed with a different secret, want error")
+	}
+}
+
+func TestValidateJWTRejectsGarbage(t *testing.T) {
+	if _, err := ValidateJWT("not.a.jwt", "super-secret-signing-key"); err == nil {
+		t.Error("ValidateJWT() accepted a malformed token, want error")
 	}
 }
