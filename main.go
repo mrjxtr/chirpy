@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/subtle"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -24,6 +25,7 @@ type apiConfig struct {
 	dbQueries      *database.Queries
 	platform       string
 	jwtSecret      string
+	polkaKey       string
 }
 
 func main() {
@@ -35,6 +37,10 @@ func main() {
 	if jwtSecret == "" {
 		log.Fatal("JWT_SECRET must be set")
 	}
+	polkaKey := os.Getenv("POLKA_KEY")
+	if polkaKey == "" {
+		log.Fatal("POLKA_KEY must be set")
+	}
 
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
@@ -45,6 +51,7 @@ func main() {
 		dbQueries: database.New(db),
 		platform:  pf,
 		jwtSecret: jwtSecret,
+		polkaKey:  polkaKey,
 	}
 
 	mux := http.NewServeMux()
@@ -361,7 +368,8 @@ func (cfg *apiConfig) login(w http.ResponseWriter, r *http.Request) {
 }
 
 // polkaWebhook handles subscription events from Polka, our payment provider.
-// Events we don't care about are acked with a 204 so Polka doesn't retry them.
+// Without the api key check anyone could upgrade themselves to Chirpy Red for
+// free. Events we don't care about are acked with a 204 so Polka doesn't retry.
 func (cfg *apiConfig) polkaWebhook(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
@@ -370,6 +378,18 @@ func (cfg *apiConfig) polkaWebhook(w http.ResponseWriter, r *http.Request) {
 		Data  struct {
 			UserID uuid.UUID `json:"user_id"`
 		} `json:"data"`
+	}
+
+	apiKey, err := auth.GetAPIKey(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+
+	// constant time compare so a caller can't brute force the key by timing
+	if subtle.ConstantTimeCompare([]byte(apiKey), []byte(cfg.polkaKey)) != 1 {
+		respondWithError(w, http.StatusUnauthorized, "Unauthorized")
+		return
 	}
 
 	params := parameters{}

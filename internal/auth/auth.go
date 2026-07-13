@@ -93,23 +93,35 @@ func MakeRefreshToken() (string, error) {
 	return hex.EncodeToString(key), nil
 }
 
-// GetBearerToken pulls the raw token out of an "Authorization: Bearer <token>"
-// header. Missing header or a non-Bearer scheme is an error.
-func GetBearerToken(headers http.Header) (string, error) {
+// getAuthHeaderValue pulls the value out of an "Authorization: <scheme> <value>"
+// header. Missing header or a different scheme is an error.
+func getAuthHeaderValue(headers http.Header, scheme string) (string, error) {
 	authHeader := headers.Get("Authorization")
 	if authHeader == "" {
 		return "", fmt.Errorf("no authorization header included")
 	}
 
-	token, found := strings.CutPrefix(authHeader, "Bearer ")
+	value, found := strings.CutPrefix(authHeader, scheme+" ")
 	if !found {
 		return "", fmt.Errorf("malformed authorization header")
 	}
 
-	token = strings.TrimSpace(token)
-	if token == "" {
-		return "", fmt.Errorf("no token in authorization header")
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", fmt.Errorf("no %s value in authorization header", scheme)
 	}
 
-	return token, nil
+	return value, nil
+}
+
+// GetBearerToken pulls the raw token out of an "Authorization: Bearer <token>"
+// header.
+func GetBearerToken(headers http.Header) (string, error) {
+	return getAuthHeaderValue(headers, "Bearer")
+}
+
+// GetAPIKey pulls the key out of an "Authorization: ApiKey <key>" header. This
+// is what Polka sends us, as opposed to the Bearer tokens our own users send.
+func GetAPIKey(headers http.Header) (string, error) {
+	return getAuthHeaderValue(headers, "ApiKey")
 }

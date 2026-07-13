@@ -142,6 +142,39 @@ func TestMakeRefreshToken(t *testing.T) {
 	}
 }
 
+func TestGetAPIKey(t *testing.T) {
+	tests := []struct {
+		name       string
+		authHeader string
+		setHeader  bool
+		want       string
+		wantErr    bool
+	}{
+		{"valid api key", "ApiKey abc123", true, "abc123", false},
+		{"extra whitespace", "ApiKey   abc123   ", true, "abc123", false},
+		{"no header", "", false, "", true},
+		{"bearer scheme", "Bearer abc123", true, "", true},
+		{"apikey with no value", "ApiKey ", true, "", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			headers := http.Header{}
+			if tt.setHeader {
+				headers.Set("Authorization", tt.authHeader)
+			}
+
+			got, err := GetAPIKey(headers)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("GetAPIKey() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if got != tt.want {
+				t.Errorf("GetAPIKey() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestGetBearerToken(t *testing.T) {
 	tests := []struct {
 		name       string
