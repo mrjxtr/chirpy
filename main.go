@@ -58,6 +58,8 @@ func main() {
 
 	mux.HandleFunc("POST /api/users", apiCfg.createUser)
 	mux.HandleFunc("POST /api/login", apiCfg.login)
+	mux.HandleFunc("POST /api/refresh", apiCfg.refresh)
+	mux.HandleFunc("POST /api/revoke", apiCfg.revoke)
 	mux.HandleFunc("POST /api/chirps", apiCfg.createChirp)
 	mux.HandleFunc("GET /api/chirps", apiCfg.getChirps)
 	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.getChirp)
@@ -210,20 +212,25 @@ func (cfg *apiConfig) createUser(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// defaultTokenExpiry is how long an access token lives when the client doesn't
-// ask for something shorter. It's also the hard ceiling.
-const defaultTokenExpiry = time.Hour
+const (
+	// accessTokenExpiry is how long a JWT stays good for. Short on purpose: a
+	// leaked access token stops working quickly.
+	accessTokenExpiry = time.Hour
+	// refreshTokenExpiry is how long a refresh token stays good for. Long, but
+	// revocable, since it lives in the db.
+	refreshTokenExpiry = 60 * 24 * time.Hour
+)
 
 // login checks an email/password pair against the stored hash and hands back a
-// JWT. A missing user and a wrong password both return the same 401, so the
-// response can't be used to probe which emails are registered.
+// short-lived access token plus a long-lived refresh token. A missing user and
+// a wrong password both return the same 401, so the response can't be used to
+// probe which emails are registered.
 func (cfg *apiConfig) login(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
 	type parameters struct {
-		Email            string `json:"email"`
-		Password         string `json:"password"`
-		ExpiresInSeconds *int   `json:"expires_in_seconds"`
+		Email    string `json:"email"`
+		Password string `json:"password"`
 	}
 
 	params := parameters{}
@@ -245,18 +252,66 @@ func (cfg *apiConfig) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// clients may ask for a shorter token, but never a longer one. a zero or
-	// negative request would mint an already-expired token, so those fall back
-	// to the default too.
-	expiresIn := defaultTokenExpiry
-	if params.ExpiresInSeconds != nil {
-		requested := time.Duration(*params.ExpiresInSeconds) * time.Second
-		if requested > 0 && requested < defaultTokenExpiry {
-			expiresIn = requested
-		}
+	accessToken, err := auth.MakeJWT(user.ID, cfg.jwtSecret, accessTokenExpiry)
+	if err != nil {
+		respondWithError(
+			w,
+			http.StatusInternalServerError,
+			fmt.Sprintf("Error creating token: %v", err),
+		)
+		return
 	}
 
-	token, err := auth.MakeJWT(user.ID, cfg.jwtSecret, expiresIn)
+	refreshToken, err := auth.MakeRefreshToken()
+	if err != nil {
+		respondWithError(
+			w,
+			http.StatusInternalServerError,
+			fmt.Sprintf("Error creating refresh token: %v", err),
+		)
+		return
+	}
+
+	_, err = cfg.dbQueries.CreateRefreshToken(r.Context(), database.CreateRefreshTokenParams{
+		Token:     refreshToken,
+		UserID:    user.ID,
+		ExpiresAt: time.Now().UTC().Add(refreshTokenExpiry),
+	})
+	if err != nil {
+		respondWithError(
+			w,
+			http.StatusInternalServerError,
+			fmt.Sprintf("Error storing refresh token: %v", err),
+		)
+		return
+	}
+
+	respondWithJSON(w, http.StatusOK, map[string]any{
+		"id":            user.ID,
+		"created_at":    user.CreatedAt,
+		"updated_at":    user.UpdatedAt,
+		"email":         user.Email,
+		"token":         accessToken,
+		"refresh_token": refreshToken,
+	})
+}
+
+// refresh swaps a valid refresh token for a fresh access token. The lookup
+// query already filters out revoked and expired tokens, so any miss is a 401.
+func (cfg *apiConfig) refresh(w http.ResponseWriter, r *http.Request) {
+	refreshToken, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+
+	user, err := cfg.dbQueries.GetUserFromRefreshToken(r.Context(), refreshToken)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+
+	accessToken, err := auth.MakeJWT(user.ID, cfg.jwtSecret, accessTokenExpiry)
 	if err != nil {
 		respondWithError(
 			w,
@@ -267,12 +322,29 @@ func (cfg *apiConfig) login(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respondWithJSON(w, http.StatusOK, map[string]any{
-		"id":         user.ID,
-		"created_at": user.CreatedAt,
-		"updated_at": user.UpdatedAt,
-		"email":      user.Email,
-		"token":      token,
+		"token": accessToken,
 	})
+}
+
+// revoke marks a refresh token as revoked so it can't mint any more access
+// tokens. Returns 204 with no body.
+func (cfg *apiConfig) revoke(w http.ResponseWriter, r *http.Request) {
+	refreshToken, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+
+	if err := cfg.dbQueries.RevokeRefreshToken(r.Context(), refreshToken); err != nil {
+		respondWithError(
+			w,
+			http.StatusInternalServerError,
+			fmt.Sprintf("Error revoking refresh token: %v", err),
+		)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // createChirp takes the author from the bearer token, not the request body, so
