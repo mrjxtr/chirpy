@@ -3,6 +3,8 @@ package auth
 
 import (
 	"fmt"
+	"net/http"
+	"strings"
 	"time"
 
 	"github.com/alexedwards/argon2id"
@@ -75,4 +77,25 @@ func ValidateJWT(tokenString, tokenSecret string) (uuid.UUID, error) {
 	}
 
 	return userID, nil
+}
+
+// GetBearerToken pulls the raw token out of an "Authorization: Bearer <token>"
+// header. Missing header or a non-Bearer scheme is an error.
+func GetBearerToken(headers http.Header) (string, error) {
+	authHeader := headers.Get("Authorization")
+	if authHeader == "" {
+		return "", fmt.Errorf("no authorization header included")
+	}
+
+	token, found := strings.CutPrefix(authHeader, "Bearer ")
+	if !found {
+		return "", fmt.Errorf("malformed authorization header")
+	}
+
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return "", fmt.Errorf("no token in authorization header")
+	}
+
+	return token, nil
 }

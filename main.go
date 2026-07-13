@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
@@ -22,6 +23,7 @@ type apiConfig struct {
 	fileserverHits atomic.Int32
 	dbQueries      *database.Queries
 	platform       string
+	jwtSecret      string
 }
 
 func main() {
@@ -29,6 +31,10 @@ func main() {
 
 	dbURL := os.Getenv("DB_URL")
 	pf := os.Getenv("PLATFORM")
+	jwtSecret := os.Getenv("JWT_SECRET")
+	if jwtSecret == "" {
+		log.Fatal("JWT_SECRET must be set")
+	}
 
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
@@ -38,6 +44,7 @@ func main() {
 	apiCfg := &apiConfig{
 		dbQueries: database.New(db),
 		platform:  pf,
+		jwtSecret: jwtSecret,
 	}
 
 	mux := http.NewServeMux()
@@ -203,15 +210,20 @@ func (cfg *apiConfig) createUser(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// login checks an email/password pair against the stored hash. A missing user
-// and a wrong password both return the same 401, so the response can't be used
-// to probe which emails are registered.
+// defaultTokenExpiry is how long an access token lives when the client doesn't
+// ask for something shorter. It's also the hard ceiling.
+const defaultTokenExpiry = time.Hour
+
+// login checks an email/password pair against the stored hash and hands back a
+// JWT. A missing user and a wrong password both return the same 401, so the
+// response can't be used to probe which emails are registered.
 func (cfg *apiConfig) login(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
 	type parameters struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
+		Email            string `json:"email"`
+		Password         string `json:"password"`
+		ExpiresInSeconds *int   `json:"expires_in_seconds"`
 	}
 
 	params := parameters{}
@@ -233,20 +245,55 @@ func (cfg *apiConfig) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// clients may ask for a shorter token, but never a longer one. a zero or
+	// negative request would mint an already-expired token, so those fall back
+	// to the default too.
+	expiresIn := defaultTokenExpiry
+	if params.ExpiresInSeconds != nil {
+		requested := time.Duration(*params.ExpiresInSeconds) * time.Second
+		if requested > 0 && requested < defaultTokenExpiry {
+			expiresIn = requested
+		}
+	}
+
+	token, err := auth.MakeJWT(user.ID, cfg.jwtSecret, expiresIn)
+	if err != nil {
+		respondWithError(
+			w,
+			http.StatusInternalServerError,
+			fmt.Sprintf("Error creating token: %v", err),
+		)
+		return
+	}
+
 	respondWithJSON(w, http.StatusOK, map[string]any{
 		"id":         user.ID,
 		"created_at": user.CreatedAt,
 		"updated_at": user.UpdatedAt,
 		"email":      user.Email,
+		"token":      token,
 	})
 }
 
+// createChirp takes the author from the bearer token, not the request body, so
+// a caller can only ever chirp as themselves.
 func (cfg *apiConfig) createChirp(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
 	type parameters struct {
-		Body   string    `json:"body"`
-		UserID uuid.UUID `json:"user_id"`
+		Body string `json:"body"`
+	}
+
+	token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+
+	userID, err := auth.ValidateJWT(token, cfg.jwtSecret)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Unauthorized")
+		return
 	}
 
 	params := parameters{}
@@ -263,7 +310,7 @@ func (cfg *apiConfig) createChirp(w http.ResponseWriter, r *http.Request) {
 
 	chirp, err := cfg.dbQueries.CreateChirp(r.Context(), database.CreateChirpParams{
 		Body:   cleanProfanity(params.Body),
-		UserID: params.UserID,
+		UserID: userID,
 	})
 	if err != nil {
 		respondWithError(

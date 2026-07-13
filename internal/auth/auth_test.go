@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"net/http"
 	"testing"
 	"time"
 
@@ -113,5 +114,39 @@ func TestValidateJWTRejectsWrongSecret(t *testing.T) {
 func TestValidateJWTRejectsGarbage(t *testing.T) {
 	if _, err := ValidateJWT("not.a.jwt", "super-secret-signing-key"); err == nil {
 		t.Error("ValidateJWT() accepted a malformed token, want error")
+	}
+}
+
+func TestGetBearerToken(t *testing.T) {
+	tests := []struct {
+		name       string
+		authHeader string
+		setHeader  bool
+		want       string
+		wantErr    bool
+	}{
+		{"valid bearer", "Bearer abc123", true, "abc123", false},
+		{"extra whitespace", "Bearer   abc123   ", true, "abc123", false},
+		{"no header", "", false, "", true},
+		{"empty header", "", true, "", true},
+		{"wrong scheme", "Basic abc123", true, "", true},
+		{"bearer with no token", "Bearer ", true, "", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			headers := http.Header{}
+			if tt.setHeader {
+				headers.Set("Authorization", tt.authHeader)
+			}
+
+			got, err := GetBearerToken(headers)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("GetBearerToken() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if got != tt.want {
+				t.Errorf("GetBearerToken() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
