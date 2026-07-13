@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -50,6 +51,7 @@ func main() {
 	mux.HandleFunc("POST /api/users", apiCfg.createUser)
 	mux.HandleFunc("POST /api/chirps", apiCfg.createChirp)
 	mux.HandleFunc("GET /api/chirps", apiCfg.getChirps)
+	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.getChirp)
 
 	srv := http.Server{
 		Addr:    ":8080",
@@ -248,4 +250,36 @@ func (cfg *apiConfig) getChirps(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respondWithJSON(w, http.StatusOK, resp)
+}
+
+// getChirp looks up a single chirp by the {chirpID} path param. 404s on a bad
+// uuid or a missing row, since both mean "no such chirp" to the caller.
+func (cfg *apiConfig) getChirp(w http.ResponseWriter, r *http.Request) {
+	chirpID, err := uuid.Parse(r.PathValue("chirpID"))
+	if err != nil {
+		respondWithError(w, http.StatusNotFound, "Chirp not found")
+		return
+	}
+
+	chirp, err := cfg.dbQueries.GetChirp(r.Context(), chirpID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			respondWithError(w, http.StatusNotFound, "Chirp not found")
+			return
+		}
+		respondWithError(
+			w,
+			http.StatusInternalServerError,
+			fmt.Sprintf("Error getting chirp: %v", err),
+		)
+		return
+	}
+
+	respondWithJSON(w, http.StatusOK, map[string]any{
+		"id":         chirp.ID,
+		"created_at": chirp.CreatedAt,
+		"updated_at": chirp.UpdatedAt,
+		"body":       chirp.Body,
+		"user_id":    chirp.UserID,
+	})
 }
