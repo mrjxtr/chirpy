@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
+	"github.com/mrjxtr/chirpy/internal/auth"
 	"github.com/mrjxtr/chirpy/internal/database"
 )
 
@@ -49,6 +50,7 @@ func main() {
 	mux.HandleFunc("GET /api/healthz", healthHandler)
 
 	mux.HandleFunc("POST /api/users", apiCfg.createUser)
+	mux.HandleFunc("POST /api/login", apiCfg.login)
 	mux.HandleFunc("POST /api/chirps", apiCfg.createChirp)
 	mux.HandleFunc("GET /api/chirps", apiCfg.getChirps)
 	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.getChirp)
@@ -153,19 +155,37 @@ func (cfg *apiConfig) resetMetricsHandler(w http.ResponseWriter, r *http.Request
 	w.WriteHeader(http.StatusOK)
 }
 
+// createUser hashes the incoming password before storing it. The hash never
+// leaves the server, so it's kept out of the response.
 func (cfg *apiConfig) createUser(w http.ResponseWriter, r *http.Request) {
+	defer r.Body.Close()
+
 	type parameters struct {
-		Email string `json:"email"`
+		Email    string `json:"email"`
+		Password string `json:"password"`
 	}
 
 	params := parameters{}
 	decoder := json.NewDecoder(r.Body)
 	if err := decoder.Decode(&params); err != nil {
-		respondWithError(w, http.StatusBadRequest, "Invalid request paylaod")
+		respondWithError(w, http.StatusBadRequest, "Invalid request payload")
 		return
 	}
 
-	user, err := cfg.dbQueries.CreateUser(r.Context(), params.Email)
+	hashedPassword, err := auth.HashPassword(params.Password)
+	if err != nil {
+		respondWithError(
+			w,
+			http.StatusInternalServerError,
+			fmt.Sprintf("Error hashing password: %v", err),
+		)
+		return
+	}
+
+	user, err := cfg.dbQueries.CreateUser(r.Context(), database.CreateUserParams{
+		Email:          params.Email,
+		HashedPassword: hashedPassword,
+	})
 	if err != nil {
 		respondWithError(
 			w,
@@ -176,6 +196,44 @@ func (cfg *apiConfig) createUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respondWithJSON(w, http.StatusCreated, map[string]any{
+		"id":         user.ID,
+		"created_at": user.CreatedAt,
+		"updated_at": user.UpdatedAt,
+		"email":      user.Email,
+	})
+}
+
+// login checks an email/password pair against the stored hash. A missing user
+// and a wrong password both return the same 401, so the response can't be used
+// to probe which emails are registered.
+func (cfg *apiConfig) login(w http.ResponseWriter, r *http.Request) {
+	defer r.Body.Close()
+
+	type parameters struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+
+	params := parameters{}
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(&params); err != nil {
+		respondWithError(w, http.StatusBadRequest, "Invalid request payload")
+		return
+	}
+
+	user, err := cfg.dbQueries.GetUserByEmail(r.Context(), params.Email)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Incorrect email or password")
+		return
+	}
+
+	match, err := auth.CheckPasswordHash(params.Password, user.HashedPassword)
+	if err != nil || !match {
+		respondWithError(w, http.StatusUnauthorized, "Incorrect email or password")
+		return
+	}
+
+	respondWithJSON(w, http.StatusOK, map[string]any{
 		"id":         user.ID,
 		"created_at": user.CreatedAt,
 		"updated_at": user.UpdatedAt,
