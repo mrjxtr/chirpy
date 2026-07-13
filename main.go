@@ -61,6 +61,7 @@ func main() {
 	mux.HandleFunc("POST /api/login", apiCfg.login)
 	mux.HandleFunc("POST /api/refresh", apiCfg.refresh)
 	mux.HandleFunc("POST /api/revoke", apiCfg.revoke)
+	mux.HandleFunc("POST /api/polka/webhooks", apiCfg.polkaWebhook)
 	mux.HandleFunc("POST /api/chirps", apiCfg.createChirp)
 	mux.HandleFunc("GET /api/chirps", apiCfg.getChirps)
 	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.getChirp)
@@ -115,6 +116,18 @@ func respondWithError(w http.ResponseWriter, code int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	w.Write(resp)
+}
+
+// userResponse is the public shape of a user. One place to build it means the
+// hashed password can't leak by accident and every endpoint stays in sync.
+func userResponse(user database.User) map[string]any {
+	return map[string]any{
+		"id":            user.ID,
+		"created_at":    user.CreatedAt,
+		"updated_at":    user.UpdatedAt,
+		"email":         user.Email,
+		"is_chirpy_red": user.IsChirpyRed,
+	}
 }
 
 func respondWithJSON(w http.ResponseWriter, code int, payload any) {
@@ -206,12 +219,7 @@ func (cfg *apiConfig) createUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	respondWithJSON(w, http.StatusCreated, map[string]any{
-		"id":         user.ID,
-		"created_at": user.CreatedAt,
-		"updated_at": user.UpdatedAt,
-		"email":      user.Email,
-	})
+	respondWithJSON(w, http.StatusCreated, userResponse(user))
 }
 
 // updateUser changes the caller's own email and password. The row to update
@@ -268,12 +276,7 @@ func (cfg *apiConfig) updateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	respondWithJSON(w, http.StatusOK, map[string]any{
-		"id":         user.ID,
-		"created_at": user.CreatedAt,
-		"updated_at": user.UpdatedAt,
-		"email":      user.Email,
-	})
+	respondWithJSON(w, http.StatusOK, userResponse(user))
 }
 
 const (
@@ -350,14 +353,51 @@ func (cfg *apiConfig) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	respondWithJSON(w, http.StatusOK, map[string]any{
-		"id":            user.ID,
-		"created_at":    user.CreatedAt,
-		"updated_at":    user.UpdatedAt,
-		"email":         user.Email,
-		"token":         accessToken,
-		"refresh_token": refreshToken,
-	})
+	resp := userResponse(user)
+	resp["token"] = accessToken
+	resp["refresh_token"] = refreshToken
+
+	respondWithJSON(w, http.StatusOK, resp)
+}
+
+// polkaWebhook handles subscription events from Polka, our payment provider.
+// Events we don't care about are acked with a 204 so Polka doesn't retry them.
+func (cfg *apiConfig) polkaWebhook(w http.ResponseWriter, r *http.Request) {
+	defer r.Body.Close()
+
+	type parameters struct {
+		Event string `json:"event"`
+		Data  struct {
+			UserID uuid.UUID `json:"user_id"`
+		} `json:"data"`
+	}
+
+	params := parameters{}
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(&params); err != nil {
+		respondWithError(w, http.StatusBadRequest, "Invalid request payload")
+		return
+	}
+
+	if params.Event != "user.upgraded" {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	if _, err := cfg.dbQueries.UpgradeUserToChirpyRed(r.Context(), params.Data.UserID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			respondWithError(w, http.StatusNotFound, "User not found")
+			return
+		}
+		respondWithError(
+			w,
+			http.StatusInternalServerError,
+			fmt.Sprintf("Error upgrading user: %v", err),
+		)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // refresh swaps a valid refresh token for a fresh access token. The lookup
