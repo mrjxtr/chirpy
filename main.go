@@ -57,6 +57,7 @@ func main() {
 	mux.HandleFunc("GET /api/healthz", healthHandler)
 
 	mux.HandleFunc("POST /api/users", apiCfg.createUser)
+	mux.HandleFunc("PUT /api/users", apiCfg.updateUser)
 	mux.HandleFunc("POST /api/login", apiCfg.login)
 	mux.HandleFunc("POST /api/refresh", apiCfg.refresh)
 	mux.HandleFunc("POST /api/revoke", apiCfg.revoke)
@@ -205,6 +206,68 @@ func (cfg *apiConfig) createUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respondWithJSON(w, http.StatusCreated, map[string]any{
+		"id":         user.ID,
+		"created_at": user.CreatedAt,
+		"updated_at": user.UpdatedAt,
+		"email":      user.Email,
+	})
+}
+
+// updateUser changes the caller's own email and password. The row to update
+// comes from the access token, not the body, so there's no way to aim this at
+// someone else's account.
+func (cfg *apiConfig) updateUser(w http.ResponseWriter, r *http.Request) {
+	defer r.Body.Close()
+
+	type parameters struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+
+	token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+
+	userID, err := auth.ValidateJWT(token, cfg.jwtSecret)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+
+	params := parameters{}
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(&params); err != nil {
+		respondWithError(w, http.StatusBadRequest, "Invalid request payload")
+		return
+	}
+
+	hashedPassword, err := auth.HashPassword(params.Password)
+	if err != nil {
+		respondWithError(
+			w,
+			http.StatusInternalServerError,
+			fmt.Sprintf("Error hashing password: %v", err),
+		)
+		return
+	}
+
+	user, err := cfg.dbQueries.UpdateUser(r.Context(), database.UpdateUserParams{
+		ID:             userID,
+		Email:          params.Email,
+		HashedPassword: hashedPassword,
+	})
+	if err != nil {
+		respondWithError(
+			w,
+			http.StatusInternalServerError,
+			fmt.Sprintf("Error updating user: %v", err),
+		)
+		return
+	}
+
+	respondWithJSON(w, http.StatusOK, map[string]any{
 		"id":         user.ID,
 		"created_at": user.CreatedAt,
 		"updated_at": user.UpdatedAt,
