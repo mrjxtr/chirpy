@@ -526,9 +526,25 @@ func (cfg *apiConfig) createChirp(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// getChirps returns every chirp in the db, oldest first (by created_at).
+// getChirps returns chirps oldest first (by created_at). An optional author_id
+// query param narrows it to one author, filtered in the db rather than here.
 func (cfg *apiConfig) getChirps(w http.ResponseWriter, r *http.Request) {
-	chirps, err := cfg.dbQueries.GetChirps(r.Context())
+	var (
+		chirps []database.Chirp
+		err    error
+	)
+
+	if authorID := r.URL.Query().Get("author_id"); authorID != "" {
+		userID, parseErr := uuid.Parse(authorID)
+		if parseErr != nil {
+			respondWithError(w, http.StatusBadRequest, "Invalid author_id")
+			return
+		}
+		chirps, err = cfg.dbQueries.GetChirpsByAuthor(r.Context(), userID)
+	} else {
+		chirps, err = cfg.dbQueries.GetChirps(r.Context())
+	}
+
 	if err != nil {
 		respondWithError(
 			w,
