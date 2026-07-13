@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -526,8 +527,9 @@ func (cfg *apiConfig) createChirp(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// getChirps returns chirps oldest first (by created_at). An optional author_id
-// query param narrows it to one author, filtered in the db rather than here.
+// getChirps returns chirps by created_at, ascending by default. Optional query
+// params: author_id narrows to one author (filtered in the db), and sort=desc
+// flips the order.
 func (cfg *apiConfig) getChirps(w http.ResponseWriter, r *http.Request) {
 	var (
 		chirps []database.Chirp
@@ -552,6 +554,12 @@ func (cfg *apiConfig) getChirps(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("Error getting chirps: %v", err),
 		)
 		return
+	}
+
+	// both queries already sort ascending, so desc is just a flip. anything
+	// other than "desc" keeps the default ascending order.
+	if r.URL.Query().Get("sort") == "desc" {
+		slices.Reverse(chirps)
 	}
 
 	// build explicitly so an empty table still marshals as [] instead of null
